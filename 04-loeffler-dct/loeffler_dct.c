@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include "vpi_user.h"
 
+// just including the C file cause it's a small project.
+#include "dct_88.c"
+
 /**
  * for readability of loeffler_dct_calltf function, we have this struct that groups all of the
  * expected arguments together.
@@ -10,11 +13,6 @@ typedef struct loeffler_dct_tf_args
 {
     vpiHandle array_in_handle;
     vpiHandle array_out_handle;
-    vpiHandle image_width_handle;
-    vpiHandle image_height_handle;
-
-    int32_t width_i32;
-    int32_t height_i32;
 } loeffler_dct_tf_args_t;
 
 /**
@@ -30,20 +28,8 @@ loeffler_dct_tf_args_t* loeffler_dct_tf_get_args()
     vpiHandle arg_iterator = vpi_iterate(vpiArgument, systf_handle);
     args->array_in_handle = vpi_scan(arg_iterator);
     args->array_out_handle = vpi_scan(arg_iterator);
-    args->image_width_handle = vpi_scan(arg_iterator);
-    args->image_height_handle = vpi_scan(arg_iterator);
 
     vpi_free_object(arg_iterator);
-
-    s_vpi_value value_s;
-    value_s.format = vpiIntVal;
-    vpi_get_value(args->image_width_handle, &value_s);
-    args->width_i32 = value_s.value.integer;
-
-    value_s.format = vpiIntVal;
-    vpi_get_value(args->image_height_handle, &value_s);
-    args->height_i32 = value_s.value.integer;
-
     return args;
 }
 
@@ -55,10 +41,9 @@ loeffler_dct_tf_args_t* loeffler_dct_tf_get_args()
 int loeffler_dct_tf_check_arg_dims(loeffler_dct_tf_args_t* args)
 {
     PLI_INT32 in_size = vpi_get(vpiSize, args->array_in_handle);
+    PLI_INT32 out_size = vpi_get(vpiSize, args->array_out_handle);
 
-    if (((width % 8) != 0) ||
-        ((height % 8) != 0) ||
-        ((width * height) != in_size)) {
+    if ((in_size != 64) || (out_size != 64)) {
         return -1;
     } else {
         return 0;
@@ -67,12 +52,12 @@ int loeffler_dct_tf_check_arg_dims(loeffler_dct_tf_args_t* args)
 
 /**
  * Helper function that pulls every value out of a vpiMemory (an array of registers) and puts it in
- * a newly allocated int32_t array.
+ * a newly allocated int8_t array.
  */
-int vpi_memory_to_int32_array(int32_t** target, vpiHandle mem)
+int vpi_memory_to_int8_array(int8_t** target, vpiHandle mem)
 {
     PLI_INT32 in_size = vpi_get(vpiSize, mem);
-    *target = calloc(in_size, sizeof(int32_t));
+    *target = calloc(in_size, sizeof(int8_t));
     vpiHandle reg;
     vpiHandle iter = vpi_iterate(vpiMemoryWord, mem);
     int i = 0;
@@ -80,7 +65,7 @@ int vpi_memory_to_int32_array(int32_t** target, vpiHandle mem)
         s_vpi_value reg_value;
         reg_value.format = vpiIntVal;
         vpi_get_value(reg, &reg_value);
-        (*target)[i++] = reg_value.value.integer;
+        (*target)[i++] = (int8_t)reg_value.value.integer;
     }
 
     return (int)in_size;
@@ -91,7 +76,7 @@ int vpi_memory_to_int32_array(int32_t** target, vpiHandle mem)
  *
  * Assumes that the given memory array has at least length len
  */
-void int32_array_to_vpi_memory(vpiHandle mem, int32_t* src, int len)
+void int16_array_to_vpi_memory(vpiHandle mem, int16_t* src, int len)
 {
     vpiHandle iter = vpi_iterate(vpiMemoryWord, mem);
     for (int i = 0; i < len; i++) {
@@ -100,7 +85,7 @@ void int32_array_to_vpi_memory(vpiHandle mem, int32_t* src, int len)
 
         s_vpi_value reg_value;
         reg_value.format = vpiIntVal;
-        reg_value.value.integer = src[i];
+        reg_value.value.integer = (int32_t)src[i];   // NB: will sign-extend
         vpi_put_value(reg, &reg_value, NULL, vpiNoDelay);
     }
 }
@@ -127,14 +112,20 @@ PLI_INT32 loeffler_dct_calltf()
     }
 
     // Get the input array values as an int32_t array.
-    int32_t* invals;
-    vpi_memory_to_int32_array(&invals, array_in_handle);
+    int8_t* invals;
+    vpi_memory_to_int8_array(&invals, args->array_in_handle);
 
+    // do DC subtraction and then take DCT.
+    for (int i = 0; i < 64; i++)
+        invals[i] -= 128;
 
-    //
-    int32_array_to_vpi_memory(array_out_handle, invals, in_size);
+    int16_t* outvals = calloc(64, sizeof(int16_t));
+    dct88_q8(invals, outvals);
+
+    int16_array_to_vpi_memory(args->array_out_handle, outvals, 64);
 
     free(invals);
+    free(outvals);
     return 0;
 }
 
@@ -165,32 +156,26 @@ PLI_INT32 loeffler_dct_compiletf()
     }
 
     int numargs = count_vpi_args(systf_handle);
-    if (numargs != 4) {
-        vpi_printf("$loeffler_dct: ERROR: 4 args required; %i args found.\n", numargs);
+    if (numargs != 2) {
+        vpi_printf("$loeffler_dct: ERROR: 2 args required; %i args found.\n", numargs);
         vpi_control(vpiFinish, 0);
         return 0;
     }
 
-    const PLI_INT32 expected_arg_types[] = { vpiMemory, vpiMemory, vpiConstant, vpiConstant };
-    vpiHandle arg_iterator = vpi_iterate(vpiArgument, systf_handle);
-    vpiHandle arg;
-    int i = 0;
-    while((arg = vpi_scan(arg_iterator)) != NULL) {
-        PLI_INT32 arg_type = vpi_get(vpiType, arg);
-
-        if (arg_type != expected_arg_types[i++]) {
-            vpi_printf("$loeffler_dct: ERROR: arg must have type vpiMemory.\n");
-            vpi_free_object(arg_iterator);
-            vpi_control(vpiFinish, 0);
-            return 0;
-        }
+    loeffler_dct_tf_args_t* args = loeffler_dct_tf_get_args();
+    const PLI_INT32 expected_arg_types[] = { vpiMemory, vpiMemory };
+    if ((vpi_get(vpiType, args->array_in_handle) != vpiMemory) ||
+        (vpi_get(vpiType, args->array_out_handle) != vpiMemory)) {
+        vpi_printf("$loeffler_dct: ERROR: all args must have type vpiMemory.\n");
+        vpi_printf("%s, %s\n",
+                   vpi_get_str(vpiType, args->array_in_handle),
+                   vpi_get_str(vpiType, args->array_out_handle));
+        vpi_control(vpiFinish, 0);
+        return 0;
     }
 
     // check that the sizes of the first 2 arrays match
-    PLI_INT32 in_size  = vpi_get(vpiSize, array_in_handle);
-    PLI_INT32 out_size = vpi_get(vpiSize, array_out_handle);
-    vpi_printf("arg a size is %i, arg b size is %i\n", in_size, out_size);
-    if (out_size != in_size) {
+    if (loeffler_dct_tf_check_arg_dims(args) != 0) {
         vpi_printf("$loeffler_dct: ERROR: argument arrays must have same size.\n");
         vpi_control(vpiFinish, 0);
         return 0;
