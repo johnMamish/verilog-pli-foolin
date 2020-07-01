@@ -2,9 +2,8 @@
 
 `define ARRAY_SIZE 16
 
-module showvalue_tb();
+module cumsum_tb();
     integer i;
-    reg  clock_prev;
     reg [7:0] mynums [0:(`ARRAY_SIZE - 1)];
     reg [7:0] mynums_out [0:(`ARRAY_SIZE - 1)];
     initial begin
