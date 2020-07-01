@@ -20,7 +20,10 @@ module showvalue_tb();
     initial begin
         clock = 1'b0;
         for (i = 0; i < 16; i = i + 1) begin
+            //$showvalue();
+            //$showvalue(shifter, clock, 100);
             $showvalue(shifter);
+
             @(posedge clock);
             #100;
         end

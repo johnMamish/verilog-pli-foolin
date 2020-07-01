@@ -39,7 +39,13 @@ void hello_register()
     // Function pointer to calltf that should be executed.
     tfd.calltf = hello_calltf;
 
-    // compiletf functions are called before the calltf function and validate argument types.
+    // compiletf functions are called once for each PLI-defined system task at the very beginning
+    // of simulation (before time = 0). compiletf functions are intended to be used to validate
+    // argument types. This can be useful for speeding things up if a PLI-defined system task is
+    // called millions of times in a tight loop; you just need to check once at the beginning of
+    // simulation to see if the invocations have the correct argument types. You can always do the
+    // argument checking in your calltf function, but it might be slower.
+    //
     // They are optional; if your calltf function doesn't have an associated compiletf function,
     // it should be left NULL.
     tfd.compiletf = NULL;
@@ -52,6 +58,8 @@ void hello_register()
     // a few cool things, like allowing the same calltf to be registered for 2 different system
     // functions, but have their user_data differentiate them (this could be used to reduce code
     // duplication).
+    // user_data can also be very important when a calltf is called multiple times, and the
+    // different instances need to differentiate between each other.
     tfd.user_data = NULL;
 
     // Register our function's information with the simulator so it can be called.

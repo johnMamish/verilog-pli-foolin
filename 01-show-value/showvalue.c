@@ -19,6 +19,11 @@ PLI_INT32 showvalue_calltf()
     return 0;
 }
 
+/**
+ * Given a vpiHandle to a vpiSysTfCall (acquired by calling vpi_handle(vpiSysTfCall, NULL)), this
+ * function will return an integer telling how many arguments have been passed into the present
+ * SysTfCall.
+ */
 int count_vpi_args(vpiHandle systf_handle)
 {
     vpiHandle arg_iterator = vpi_iterate(vpiArgument, systf_handle);
