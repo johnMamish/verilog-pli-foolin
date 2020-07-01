@@ -3,14 +3,76 @@
 #include "vpi_user.h"
 
 /**
+ * for readability of loeffler_dct_calltf function, we have this struct that groups all of the
+ * expected arguments together.
+ */
+typedef struct loeffler_dct_tf_args
+{
+    vpiHandle array_in_handle;
+    vpiHandle array_out_handle;
+    vpiHandle image_width_handle;
+    vpiHandle image_height_handle;
+
+    int32_t width_i32;
+    int32_t height_i32;
+} loeffler_dct_tf_args_t;
+
+/**
+ * Convenience function that gets all of the args for a loeffler_dct PLI System Task call
+ *
+ * assumes that there are 4 arguments, and that the systf handle is valid.
+ */
+loeffler_dct_tf_args_t* loeffler_dct_tf_get_args()
+{
+    loeffler_dct_tf_args_t* args = calloc(1, sizeof(loeffler_dct_tf_args_t));
+
+    vpiHandle systf_handle = vpi_handle(vpiSysTfCall, NULL);
+    vpiHandle arg_iterator = vpi_iterate(vpiArgument, systf_handle);
+    args->array_in_handle = vpi_scan(arg_iterator);
+    args->array_out_handle = vpi_scan(arg_iterator);
+    args->image_width_handle = vpi_scan(arg_iterator);
+    args->image_height_handle = vpi_scan(arg_iterator);
+
+    vpi_free_object(arg_iterator);
+
+    s_vpi_value value_s;
+    value_s.format = vpiIntVal;
+    vpi_get_value(args->image_width_handle, &value_s);
+    args->width_i32 = value_s.value.integer;
+
+    value_s.format = vpiIntVal;
+    vpi_get_value(args->image_height_handle, &value_s);
+    args->height_i32 = value_s.value.integer;
+
+    return args;
+}
+
+/**
+ * Checks the width and height of the given args against array size.
+ *
+ * These checks need to be done during runtime, not at compiletf time. Returns 0 if the args are good.
+ */
+int loeffler_dct_tf_check_arg_dims(loeffler_dct_tf_args_t* args)
+{
+    PLI_INT32 in_size = vpi_get(vpiSize, args->array_in_handle);
+
+    if (((width % 8) != 0) ||
+        ((height % 8) != 0) ||
+        ((width * height) != in_size)) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+/**
  * Helper function that pulls every value out of a vpiMemory (an array of registers) and puts it in
  * a newly allocated int32_t array.
  */
-int vpi_memory_to_int32_array(vpiHandle mem, int32_t** target)
+int vpi_memory_to_int32_array(int32_t** target, vpiHandle mem)
 {
     PLI_INT32 in_size = vpi_get(vpiSize, mem);
     *target = calloc(in_size, sizeof(int32_t));
-
     vpiHandle reg;
     vpiHandle iter = vpi_iterate(vpiMemoryWord, mem);
     int i = 0;
@@ -18,73 +80,61 @@ int vpi_memory_to_int32_array(vpiHandle mem, int32_t** target)
         s_vpi_value reg_value;
         reg_value.format = vpiIntVal;
         vpi_get_value(reg, &reg_value);
-        *target[i++] = reg_value.value.integer;
+        (*target)[i++] = reg_value.value.integer;
     }
 
     return (int)in_size;
 }
 
+/**
+ * Helper function that takes values out of an int32_t array and puts them in an array of registers.
+ *
+ * Assumes that the given memory array has at least length len
+ */
+void int32_array_to_vpi_memory(vpiHandle mem, int32_t* src, int len)
+{
+    vpiHandle iter = vpi_iterate(vpiMemoryWord, mem);
+    for (int i = 0; i < len; i++) {
+        vpiHandle reg;
+        reg = vpi_scan(iter);
 
-
+        s_vpi_value reg_value;
+        reg_value.format = vpiIntVal;
+        reg_value.value.integer = src[i];
+        vpi_put_value(reg, &reg_value, NULL, vpiNoDelay);
+    }
+}
 
 /**
- * This PLI task takes an input array, an output array, and 2 integer dimensions.
+ * This PLI task takes an input array and an output array. It's assumed that both the input array
+ * and the output array are 8x8 row-major
  *
  * The input array is expected to be 8-bit and to have unsigned pixel values in the range [0, 255].
  * the input array's depth shall be the width of the given image times the length.
  *
- * The output array is expected to be 16-bit signed 7Q8. It will be in row-major, MCU-major order.
- * The first 64 values in the output array will correspond to the row-major values in the pixel
- * block starting at (x, y) = (0, 0).
- *
- * The width and height of the image shall both be multiples of 8.
+ * The output array is expected to be 16-bit signed 7Q8. It will be in row-major order.
  */
 PLI_INT32 loeffler_dct_calltf()
 {
     // We already know from compiletf that we have 2 args and they're both of the right type
-    vpiHandle systf_handle = vpi_handle(vpiSysTfCall, NULL);
-    vpiHandle arg_iterator = vpi_iterate(vpiArgument, systf_handle);
-    vpiHandle array_in_handle = vpi_scan(arg_iterator);
-    vpiHandle array_out_handle = vpi_scan(arg_iterator);
-    vpiHandle image_width_handle = vpi_scan(arg_iterator);
-    vpiHandle image_height_handle = vpi_scan(arg_iterator);
-    //vpi_free_object(arg_iterator);
-    vpi_printf("foo\n");
-
-    // check that the sizes of the 2 arrays match. could be in compiletf.
-    PLI_INT32 in_size  = vpi_get(vpiSize, array_in_handle);
-    PLI_INT32 out_size = vpi_get(vpiSize, array_out_handle);
-    vpi_printf("arg a size is %i, arg b size is %i\n", in_size, out_size);
-    if (out_size != in_size) {
-        vpi_printf("$loeffler_dct: ERROR: argument arrays must have same size.\n");
-        vpi_control(vpiFinish, 0);
-        return 0;
-    }
+    loeffler_dct_tf_args_t* args = loeffler_dct_tf_get_args();
 
     // get the width and height values of the image; sanity check them.
-    s_vpi_value value_s;
-    value_s.format = vpiIntVal;
-    vpi_get_value(image_width_handle, &value_s);
-    int32_t width = value_s.value.integer;
-
-    value_s.format = vpiIntVal;
-    vpi_get_value(image_height_handle, &value_s);
-    int32_t height = value_s.value.integer;
-
-    if (((width % 8) != 0) ||
-        ((height % 8) != 0) ||
-        ((width * height) != in_size)) {
+    if (loeffler_dct_tf_check_arg_dims(args) != 0) {
         vpi_printf("$loeffler_dct: ERROR: provided width and height are bad.\n");
         vpi_control(vpiFinish, 0);
         return 0;
     }
-    int32_t* invals;
-    vpi_memory_to_int32_array(array_in_handle, &invals);
-    for (int i = 0; i < in_size; i++) {
-        printf("%i, ", invals[i]);
-    }
-    free(invals);
 
+    // Get the input array values as an int32_t array.
+    int32_t* invals;
+    vpi_memory_to_int32_array(&invals, array_in_handle);
+
+
+    //
+    int32_array_to_vpi_memory(array_out_handle, invals, in_size);
+
+    free(invals);
     return 0;
 }
 
@@ -135,6 +185,17 @@ PLI_INT32 loeffler_dct_compiletf()
             return 0;
         }
     }
+
+    // check that the sizes of the first 2 arrays match
+    PLI_INT32 in_size  = vpi_get(vpiSize, array_in_handle);
+    PLI_INT32 out_size = vpi_get(vpiSize, array_out_handle);
+    vpi_printf("arg a size is %i, arg b size is %i\n", in_size, out_size);
+    if (out_size != in_size) {
+        vpi_printf("$loeffler_dct: ERROR: argument arrays must have same size.\n");
+        vpi_control(vpiFinish, 0);
+        return 0;
+    }
+
     return 0;
 }
 
